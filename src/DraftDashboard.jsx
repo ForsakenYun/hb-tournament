@@ -710,10 +710,6 @@ function AuthScreen({ onLogin, onRegister, error }) {
           <PrimaryButton onClick={submit} disabled={submitDisabled} className="w-full">
             {mode === "login" ? "登录" : "创建账号"}
           </PrimaryButton>
-
-          {mode === "login" && (
-            <div className="text-[10px] text-white/25 mt-4 text-center">首次使用？默认管理员账号是 <span className="font-mono" style={{ color: TEAL_SOFT }}>admin / admin123</span> —— 登录后请及时修改密码。新选手账号需要管理员提供的邀请码才能注册。</div>
-          )}
         </PanelFrame>
       </div>
     </div>
