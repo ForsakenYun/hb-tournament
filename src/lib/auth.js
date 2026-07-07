@@ -78,6 +78,7 @@ function rpcError(error, fallback) {
     not_authorized: "没有权限执行此操作，请重新登录。",
     cannot_modify_self: "无法更改自己的账号。",
     cannot_delete_self: "无法删除自己的账号。",
+    code_generation_failed: "生成邀请码失败，请重试。",
   };
   return new Error(known[code] || fallback || error?.message || "操作失败。");
 }
@@ -154,9 +155,9 @@ export async function adminDeleteAccount(accountId) {
 }
 
 // ── admin: invites ───────────────────────────────────────────────────────
-export async function adminCreateInvite({ maxUses, expiresAt, code }) {
+export async function adminCreateInvite({ maxUses, expiresAt }) {
   const { data, error } = await supabase.rpc("admin_create_invite", {
-    p_session_token: getSessionToken(), p_max_uses: maxUses, p_expires_at: expiresAt ? new Date(expiresAt).toISOString() : null, p_code: code,
+    p_session_token: getSessionToken(), p_max_uses: maxUses, p_expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
   });
   if (error) throw rpcError(error, "创建邀请码失败。");
   return mapInvite(data);
