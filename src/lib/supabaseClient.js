@@ -1,23 +1,31 @@
+// lib/supabaseClient.js
+//
+// One shared Supabase client for the whole app.
+//
+// Env vars needed (Vercel → Project Settings → Environment Variables,
+// and a local .env.local for dev):
+//   VITE_SUPABASE_URL=https://YOUR-PROJECT.supabase.co
+//   VITE_SUPABASE_ANON_KEY=YOUR-ANON-PUBLIC-KEY
+//
+// (If this project uses Next.js instead of Vite, use
+//  NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY and swap the
+//  import.meta.env lines below for process.env.)
+//
+// npm install @supabase/supabase-js
+
 import { createClient } from "@supabase/supabase-js";
 
-// Single shared Supabase client for the entire project. Every module that
-// needs Supabase (DraftDashboard.jsx included) imports `supabase` from
-// here instead of calling `createClient` itself, so there's only ever one
-// client/websocket connection per browser tab.
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  // Fail loudly at startup rather than silently getting empty data back
-  // from a misconfigured client.
+if (!supabaseUrl || !supabaseAnonKey) {
+  // Fail loudly in dev rather than silently limping along with a broken client.
   console.error(
-    "Missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY. Set them in your .env file (see SETUP.md)."
+    "Missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY. Add them to .env.local and to your Vercel project's environment variables."
   );
 }
 
-// The anon key is meant to be public (it ships to every browser); access
-// control is enforced by RLS policies / RPC functions in Postgres, not by
-// hiding this key.
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: { persistSession: false }, // we manage our own lightweight session token, see lib/auth.js
   realtime: { params: { eventsPerSecond: 10 } },
 });

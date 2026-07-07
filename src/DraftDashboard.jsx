@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { supabase } from "./lib/supabaseClient";
 
 /* ════════════════════════════════════════════════════════════════════════
    CONSTANTS & THEME (unchanged from original)
@@ -150,121 +149,55 @@ function coreRoleLabel(coreRole) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   PERSISTENCE — Supabase Realtime-backed shared state.
-   This is the single source of truth for ALL users, on ALL devices, from
-   ANY IP: every browser tab reads/writes the same row in Postgres, and
-   Supabase Realtime pushes every change to every connected client the
-   instant it happens (via `postgres_changes` on the `draft_sync` table).
-   There is no per-device/per-session copy of this data — `state` is only
-   ever a local *cache* of the last value received from the database.
-
-   The Supabase client itself lives in `src/lib/supabaseClient.js` (reading
-   `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`) and is imported above —
-   this file does not create its own client, so the whole project shares
-   exactly one Supabase connection.
-
-   REQUIRED ONE-TIME SUPABASE SETUP (run once in the Supabase SQL editor
-   for your project — see the accompanying SETUP.md for the full script):
-     1. Create table `public.draft_sync (key text primary key, value jsonb,
-        updated_at timestamptz)`.
-     2. `alter publication supabase_realtime add table public.draft_sync;`
-        so changes are broadcast in real time.
-     3. Enable RLS with permissive read/write policies (or lock down to
-        your own auth scheme — see SETUP.md for a stricter alternative).
-     4. Create the `consume_invite` and `register_account` RPC functions
-        (SETUP.md) so invite redemption and username registration are
-        atomic at the database level — this closes the two race conditions
-        that were previously only "mitigated" client-side.
+   PERSISTENCE — localStorage-backed "shared" state with cross-tab sync.
+   This simulates a live multi-user backend without one. Swap this hook's
+   internals for real API calls + websockets/polling when wiring up a
+   real server; every consumer below only depends on [state, setState].
    ════════════════════════════════════════════════════════════════════════ */
-const SYNC_TABLE = "draft_sync";
-
 const STORAGE_KEYS = {
   accounts: "draftnet_accounts_v1",
   tournament: "draftnet_tournament_v1",
-  session: "draftnet_session_v1", // intentionally NOT synced — see below
+  session: "draftnet_session_v1",
   invites: "draftnet_invites_v1",
 };
 
-// Session ("which local browser is currently logged in as which account")
-// is the one piece of state that is *correctly* per-device: logging in on
-// your phone shouldn't log in your laptop. Everything else — accounts,
-// invites, tournament/draft state — lives only in Supabase.
-function readLocalSession(fallback) {
+function readStorage(key, fallback) {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.session);
+    const raw = localStorage.getItem(key);
     return raw ? JSON.parse(raw) : fallback;
   } catch { return fallback; }
 }
-function writeLocalSession(value) {
-  try { localStorage.setItem(STORAGE_KEYS.session, JSON.stringify(value)); } catch {}
+function writeStorage(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
 }
 
-// Shared, realtime, database-backed state. Returns [state, setState, loaded]
-// with the same calling convention as the old localStorage-based hook
-// (setState accepts either a value or an updater function), so none of the
-// consumer components below needed to change. `loaded` is true once the
-// initial value has actually been fetched from Supabase — consumers should
-// treat `state` as not-yet-authoritative until then.
 function useSyncedState(key, initialValue) {
-  const [state, setState] = useState(initialValue);
-  const [loaded, setLoaded] = useState(false);
+  const [state, setState] = useState(() => readStorage(key, initialValue));
   const stateRef = useRef(state);
   stateRef.current = state;
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function init() {
-      const { data, error } = await supabase.from(SYNC_TABLE).select("value").eq("key", key).maybeSingle();
-      if (cancelled) return;
-      if (error) {
-        console.error(`[sync:${key}] initial fetch failed`, error);
-        setLoaded(true); // don't hang the UI forever on a config error
-        return;
+    const onStorage = (e) => {
+      if (e.key === key && e.newValue) {
+        try { setState(JSON.parse(e.newValue)); } catch {}
       }
-      if (data) {
-        setState(data.value);
-      } else {
-        // Row doesn't exist yet (first run) — seed it so every future
-        // client, on any device, sees the same starting point.
-        const { error: seedErr } = await supabase.from(SYNC_TABLE).insert({ key, value: initialValue });
-        if (seedErr && seedErr.code !== "23505") console.error(`[sync:${key}] seed failed`, seedErr);
-        setState(initialValue);
-      }
-      setLoaded(true);
-    }
-    init();
-
-    // Real-time: any INSERT/UPDATE to this key, from ANY user/device/IP,
-    // is pushed here instantly over a websocket and applied immediately.
-    const channel = supabase
-      .channel(`sync:${key}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: SYNC_TABLE, filter: `key=eq.${key}` },
-        (payload) => {
-          const incoming = payload.new?.value;
-          if (incoming === undefined) return;
-          if (JSON.stringify(incoming) !== JSON.stringify(stateRef.current)) setState(incoming);
-        }
-      )
-      .subscribe();
-
-    return () => { cancelled = true; supabase.removeChannel(channel); };
+    };
+    window.addEventListener("storage", onStorage);
+    const interval = setInterval(() => {
+      const raw = readStorage(key, null);
+      if (raw && JSON.stringify(raw) !== JSON.stringify(stateRef.current)) setState(raw);
+    }, 1500);
+    return () => { window.removeEventListener("storage", onStorage); clearInterval(interval); };
   }, [key]);
 
   const update = (updater) => {
     setState((prev) => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      supabase
-        .from(SYNC_TABLE)
-        .upsert({ key, value: next, updated_at: new Date().toISOString() }, { onConflict: "key" })
-        .then(({ error }) => { if (error) console.error(`[sync:${key}] write failed`, error); });
+      writeStorage(key, next);
       return next;
     });
   };
-
-  return [state, update, loaded];
+  return [state, update];
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -669,7 +602,7 @@ function AvatarUploadField({ avatarUrl, setAvatarUrl }) {
 /* ════════════════════════════════════════════════════════════════════════
    AUTH SCREEN — Login / Register
    ════════════════════════════════════════════════════════════════════════ */
-function AuthScreen({ onLogin, onRegister, error, busy }) {
+function AuthScreen({ onLogin, onRegister, error }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -707,7 +640,7 @@ function AuthScreen({ onLogin, onRegister, error, busy }) {
     });
   };
 
-  const submitDisabled = !!busy || !username.trim() || !password || (mode === "register" && (!displayName.trim() || !inviteCode.trim() || !roleValid));
+  const submitDisabled = !username.trim() || !password || (mode === "register" && (!displayName.trim() || !inviteCode.trim() || !roleValid));
 
   // Let Enter submit the form from either the username or password field,
   // exactly like clicking the Login/Create Account button (including
@@ -775,7 +708,7 @@ function AuthScreen({ onLogin, onRegister, error, busy }) {
           {error && <div className="text-[11px] font-bold text-center mb-3" style={{ color: "#f87171" }}>{error}</div>}
 
           <PrimaryButton onClick={submit} disabled={submitDisabled} className="w-full">
-            {busy ? "处理中…" : (mode === "login" ? "登录" : "创建账号")}
+            {mode === "login" ? "登录" : "创建账号"}
           </PrimaryButton>
         </PanelFrame>
       </div>
@@ -2166,18 +2099,14 @@ function PlayerHome({ currentUser, setAccounts, tournament, accounts }) {
    ROOT COMPONENT
    ════════════════════════════════════════════════════════════════════════ */
 export default function DraftDashboard() {
-  const [accounts, setAccounts, accountsLoaded] = useSyncedState(STORAGE_KEYS.accounts, null);
-  const [tournament, setTournament, tournamentLoaded] = useSyncedState(STORAGE_KEYS.tournament, initialTournament());
-  const [invites, setInvites, invitesLoaded] = useSyncedState(STORAGE_KEYS.invites, []);
-  const [sessionUsername, setSessionUsername] = useState(() => readLocalSession(null));
+  const [accounts, setAccounts] = useSyncedState(STORAGE_KEYS.accounts, null);
+  const [tournament, setTournament] = useSyncedState(STORAGE_KEYS.tournament, initialTournament());
+  const [invites, setInvites] = useSyncedState(STORAGE_KEYS.invites, []);
+  const [sessionUsername, setSessionUsername] = useState(() => readStorage(STORAGE_KEYS.session, null));
   const [authError, setAuthError] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
   const [view, setView] = useState("home");
 
-  // Seed the shared DB with a default admin the very first time this app
-  // is ever run against a fresh Supabase project (accounts row was empty).
-  // Guarded so it only fires once accounts have actually loaded from the DB.
-  useEffect(() => { if (accountsLoaded && accounts === null) setAccounts([buildDefaultAdmin()]); }, [accountsLoaded, accounts]);
+  useEffect(() => { if (accounts === null) setAccounts([buildDefaultAdmin()]); }, [accounts]);
 
   const currentUser = useMemo(() => (accounts || []).find((a) => a.username === sessionUsername) || null, [accounts, sessionUsername]);
 
@@ -2190,77 +2119,51 @@ export default function DraftDashboard() {
     if (!acct.enabled) { setAuthError("该账号已被禁用，请联系管理员。"); return; }
     if (acct.passwordHash !== simpleHash(password)) { setAuthError("密码错误。"); return; }
     setSessionUsername(acct.username);
-    writeLocalSession(acct.username);
+    writeStorage(STORAGE_KEYS.session, acct.username);
   };
 
   // Registration is invite-only: no account can be created without a valid,
-  // active, non-expired, non-exhausted invite code. Both the invite
-  // redemption and the username-uniqueness-checked account insert happen
-  // as ATOMIC operations inside Postgres (via the `consume_invite` and
-  // `register_account` RPC functions — see SETUP.md), guarded by a row
-  // lock, so two people racing to use the last remaining invite use — or
-  // to register the same username — from different devices/IPs can no
-  // longer both succeed. This replaces the old client-side "read the
-  // latest copy first" mitigation, which could still lose a race.
+  // active, non-expired, non-exhausted invite code. The code lookup and the
+  // usage-increment happen against the latest persisted invite list so two
+  // people racing to use the last remaining use can't both get in.
   // Players now pick their own Captain / Core Role / Sub Role at signup
   // (same rule as the Admin Dashboard's player form: Captain, or a non-
   // captain with at least one Core Role), so an admin no longer needs to set
   // these manually afterwards.
-  const doRegister = async ({ username, password, confirmPassword, displayName, avatarUrl, inviteCode, isCaptain, coreRole, positions }) => {
+  const doRegister = ({ username, password, confirmPassword, displayName, avatarUrl, inviteCode, isCaptain, coreRole, positions }) => {
     setAuthError("");
     if (!username || !password || !displayName) { setAuthError("请填写所有必填项。"); return; }
     if (!inviteCode) { setAuthError("注册需要邀请码。"); return; }
     if (!isCaptain && (!coreRole || coreRole.length === 0)) { setAuthError("请选择队长身份，或至少一个主要位置。"); return; }
     if (password !== confirmPassword) { setAuthError("两次输入的密码不一致。"); return; }
+    if ((accounts || []).some((a) => a.username.toLowerCase() === username.toLowerCase())) { setAuthError("该用户名已被使用。"); return; }
 
-    setAuthBusy(true);
-    try {
-      // Step 1: atomically validate + increment the invite in the database.
-      const { data: inviteResult, error: inviteErr } = await supabase.rpc("consume_invite", { p_code: inviteCode });
-      if (inviteErr) { setAuthError("邀请码校验失败，请重试。"); return; }
-      if (!inviteResult?.ok) {
-        const reasonMap = { not_found: "邀请码无效。", deleted: "该邀请码已不存在。", disabled: "该邀请码已被禁用。", expired: "该邀请码已过期。", exhausted: "该邀请码已达到使用次数上限。" };
-        setAuthError(reasonMap[inviteResult?.reason] || "邀请码无效。");
-        return;
-      }
+    const latestInvites = readStorage(STORAGE_KEYS.invites, invites || []) || [];
+    const invite = latestInvites.find((i) => i.code.toLowerCase() === inviteCode.toLowerCase());
+    const rejectReason = inviteRejectReason(invite);
+    if (rejectReason) { setAuthError(rejectReason); return; }
 
-      const newAcct = {
-        id: genUid("acct"), username, passwordHash: simpleHash(password), displayName,
-        avatarId: DEFAULT_AVATAR_ID, avatarUrl: avatarUrl || null,
-        role: "player", enabled: true, source: "self", inviteCodeUsed: inviteResult.invite.code,
-        isCaptain: !!isCaptain,
-        positions: isCaptain ? [CAPTAIN_ID] : [...(positions || [])],
-        coreRole: isCaptain ? [] : [...(coreRole || [])],
-        joined: false, createdAt: Date.now(),
-      };
-
-      // Step 2: atomically check-username-uniqueness + insert the account.
-      const { data: acctResult, error: acctErr } = await supabase.rpc("register_account", { p_account: newAcct });
-      if (acctErr) { setAuthError("创建账号失败，请重试。"); return; }
-      if (!acctResult?.ok) {
-        if (acctResult?.reason === "username_taken") setAuthError("该用户名已被使用。");
-        else setAuthError("创建账号失败，请重试。");
-        return;
-      }
-
-      // Both writes are already committed in Postgres; Realtime will push
-      // the updated `accounts`/`invites` rows to this and every other
-      // connected client momentarily. Log in locally right away.
-      setSessionUsername(username);
-      writeLocalSession(username);
-    } finally {
-      setAuthBusy(false);
-    }
+    const newAcct = {
+      id: genUid("acct"), username, passwordHash: simpleHash(password), displayName,
+      avatarId: DEFAULT_AVATAR_ID, avatarUrl: avatarUrl || null,
+      role: "player", enabled: true, source: "self", inviteCodeUsed: invite.code,
+      isCaptain: !!isCaptain,
+      positions: isCaptain ? [CAPTAIN_ID] : [...(positions || [])],
+      coreRole: isCaptain ? [] : [...(coreRole || [])],
+      joined: false, createdAt: Date.now(),
+    };
+    setAccounts((prev) => [...(prev || []), newAcct]);
+    setInvites((prev) => (prev || []).map((i) => i.id === invite.id ? { ...i, usedCount: i.usedCount + 1 } : i));
+    setSessionUsername(username);
+    writeStorage(STORAGE_KEYS.session, username);
   };
 
   const logout = () => { setSessionUsername(null); try { localStorage.removeItem(STORAGE_KEYS.session); } catch {} };
 
-  if (!accountsLoaded || !tournamentLoaded || !invitesLoaded || accounts === null) {
-    return <div className="min-h-screen flex items-center justify-center text-white/40" style={{ background: "#050807" }}>加载中…</div>;
-  }
+  if (accounts === null) return <div className="min-h-screen flex items-center justify-center text-white/40" style={{ background: "#050807" }}>加载中…</div>;
 
   if (!currentUser) {
-    return <AuthScreen onLogin={doLogin} onRegister={doRegister} error={authError} busy={authBusy} />;
+    return <AuthScreen onLogin={doLogin} onRegister={doRegister} error={authError} />;
   }
 
   return (
