@@ -45,6 +45,7 @@ function mapAccount(row) {
     positions: row.positions ?? [],
     coreRole: row.core_role ?? [],
     joined: row.joined,
+    inviteCodeUsed: row.invite_code,
     createdAt: row.created_at ? new Date(row.created_at).getTime() : null,
   };
 }
@@ -88,6 +89,19 @@ export async function login({ username, password }) {
   const row = Array.isArray(data) ? data[0] : data;
   setSessionToken(row.session_token);
   return mapAccount(row.account);
+}
+
+// Resolves the token stored in this browser back into an account, so a page
+// refresh doesn't silently log the user out. Returns null (not an error) if
+// there's no token, or it's expired/invalid — that's just "not logged in."
+export async function restoreSession() {
+  const token = getSessionToken();
+  if (!token) return null;
+  const { data, error } = await supabase.rpc("whoami", { p_session_token: token });
+  if (error || !data) { logout(); return null; }
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) { logout(); return null; }
+  return mapAccount(row);
 }
 
 export async function register({ username, password, displayName, avatarUrl, inviteCode, isCaptain, coreRole, positions }) {
@@ -156,6 +170,17 @@ export async function adminSetInviteStatus(inviteId, status) {
 export async function adminDeleteInvite(inviteId) {
   const { error } = await supabase.rpc("admin_delete_invite", { p_session_token: getSessionToken(), p_invite_id: inviteId });
   if (error) throw rpcError(error, "删除失败。");
+}
+
+// ── self-service ─────────────────────────────────────────────────────────
+export async function setMyJoined(joined) {
+  const { error } = await supabase.rpc("set_my_joined", { p_session_token: getSessionToken(), p_joined: joined });
+  if (error) throw rpcError(error, "操作失败。");
+}
+
+export async function adminResetAllJoined() {
+  const { error } = await supabase.rpc("admin_reset_all_joined", { p_session_token: getSessionToken() });
+  if (error) throw rpcError(error, "操作失败。");
 }
 
 export { mapAccount };

@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import { useRealtimeTable, useSupabaseTournament } from "./lib/useSupabaseSync";
+import * as Auth from "./lib/auth";
 
 /* ════════════════════════════════════════════════════════════════════════
    CONSTANTS & THEME (unchanged from original)
@@ -21,17 +23,6 @@ const TEAM_COLORS = ["#00f5d4","#22d3ee","#2dd4bf","#5eead4","#06b6d4","#0ea5e9"
 
 const genUid = (prefix = "id") => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-// NOTE: this is a lightweight client-side obfuscation, NOT real cryptographic
-// hashing. There is no server in this app, so there is no way to keep
-// credentials truly secure. Before using this in production, replace the
-// accounts/session logic in this file with real API calls to a backend that
-// hashes passwords with bcrypt/argon2 and issues real session tokens.
-function simpleHash(str) {
-  let h = 0;
-  for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
-  return `h${(h >>> 0).toString(36)}`;
-}
-
 const DEFAULT_AVATAR_ID = 0;
 const DEFAULT_AVATAR = {
   id: 0, label: "Hex", color: "#00f5d4",
@@ -42,78 +33,6 @@ const DEFAULT_AVATAR = {
     </svg>
   ),
 };
-
-const REAL_CAPTAINS = [
-  { name: "YYF-月夜枫" }, { name: "谢斌DD" }, { name: "LongDD-黄翔" }, { name: "Zhou陈尧" },
-  { name: "刘嘉俊Sylar1" }, { name: "小刘_qq" }, { name: "守护我方蛋饼" }, { name: "ok林仔" },
-];
-
-const REAL_TEAMMATES = [
-  { name: "塔利亚",        coreRole: [4,5], positions: [1] },
-  { name: "徐杰",          coreRole: [1],   positions: [3,4,5] },
-  { name: "果小果是个弟弟", coreRole: [5],   positions: [4] },
-  { name: "艾琳",          coreRole: [5],   positions: [4] },
-  { name: "啊雅Midori",    coreRole: [4],   positions: [5] },
-  { name: "三酒",          coreRole: [1],   positions: [2,3,4,5] },
-  { name: "南风",          coreRole: [3],   positions: [2] },
-  { name: "ZippO宝哥",     coreRole: [3,4,5], positions: [1,2] },
-  { name: "苏科大",        coreRole: [2],   positions: [1,3] },
-  { name: "icon冷少",      coreRole: [2],   positions: [1] },
-  { name: "憨憨",          coreRole: [3,4], positions: [1,5] },
-  { name: "zard1991",      coreRole: [3],   positions: [2] },
-  { name: "老蔡",          coreRole: [3],   positions: [4] },
-  { name: "炸毛张",        coreRole: [3],   positions: [4,5] },
-  { name: "林九鸽",        coreRole: [3,4], positions: [2] },
-  { name: "棋迷",          coreRole: [3],   positions: [4,5] },
-  { name: "蛋糕",          coreRole: [5],   positions: [1] },
-  { name: "赤小兔",        coreRole: [5],   positions: [4] },
-  { name: "九朵",          coreRole: [3],   positions: [1] },
-  { name: "甜瓜",          coreRole: [4],   positions: [5] },
-  { name: "森宝森",        coreRole: [5],   positions: [4] },
-  { name: "F91",           coreRole: [2],   positions: [4,5] },
-  { name: "狗哥",          coreRole: [1,2,4,5], positions: [3] },
-  { name: "小蝴蝶",        coreRole: [2,3], positions: [4,5] },
-  { name: "sed",           coreRole: [1,2], positions: [3] },
-  { name: "doinb",         coreRole: [3],   positions: [1] },
-  { name: "奥特曼",        coreRole: [5],   positions: [4] },
-  { name: "茜茜",          coreRole: [4],   positions: [5] },
-  { name: "汐狸",          coreRole: [4],   positions: [5] },
-  { name: "小黑",          coreRole: [3],   positions: [1,2] },
-  { name: "焙宝",          coreRole: [5],   positions: [4] },
-  { name: "小色",          coreRole: [4,5], positions: [3] },
-];
-
-function buildDefaultAdmin() {
-  return {
-    id: genUid("acct"), username: "admin", passwordHash: simpleHash("admin123"),
-    displayName: "锦标赛管理员", avatarId: DEFAULT_AVATAR_ID, avatarUrl: null,
-    role: "admin", enabled: true, source: "admin",
-    isCaptain: false, positions: [], coreRole: [], joined: false, createdAt: Date.now(),
-  };
-}
-
-function buildDemoAccounts() {
-  const accounts = [];
-  REAL_CAPTAINS.forEach((c, i) => {
-    accounts.push({
-      id: genUid("acct"), username: `captain${i + 1}`, passwordHash: simpleHash("demo123"),
-      displayName: c.name, avatarId: DEFAULT_AVATAR_ID, avatarUrl: null,
-      role: "player", enabled: true, source: "admin",
-      isCaptain: true, positions: [CAPTAIN_ID], coreRole: [],
-      joined: false, createdAt: Date.now(),
-    });
-  });
-  REAL_TEAMMATES.forEach((t, i) => {
-    accounts.push({
-      id: genUid("acct"), username: `player${i + 1}`, passwordHash: simpleHash("demo123"),
-      displayName: t.name, avatarId: DEFAULT_AVATAR_ID, avatarUrl: null,
-      role: "player", enabled: true, source: "admin",
-      isCaptain: false, positions: t.positions, coreRole: t.coreRole,
-      joined: false, createdAt: Date.now(),
-    });
-  });
-  return accounts;
-}
 
 function initialTournament() {
   return {
@@ -149,83 +68,24 @@ function coreRoleLabel(coreRole) {
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   PERSISTENCE — localStorage-backed "shared" state with cross-tab sync.
-   This simulates a live multi-user backend without one. Swap this hook's
-   internals for real API calls + websockets/polling when wiring up a
-   real server; every consumer below only depends on [state, setState].
+   PERSISTENCE — real, shared, multi-user state via Supabase (Postgres +
+   Realtime). See lib/supabaseClient.js, lib/useSupabaseSync.js, lib/auth.js.
+   No localStorage/sessionStorage is used anywhere for shared application
+   data — the only browser storage left in the app is a single session
+   token in lib/auth.js, which identifies *this device's* login and is not
+   shared app data.
    ════════════════════════════════════════════════════════════════════════ */
-const STORAGE_KEYS = {
-  accounts: "draftnet_accounts_v1",
-  tournament: "draftnet_tournament_v1",
-  session: "draftnet_session_v1",
-  invites: "draftnet_invites_v1",
-};
-
-function readStorage(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch { return fallback; }
-}
-function writeStorage(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
-}
-
-function useSyncedState(key, initialValue) {
-  const [state, setState] = useState(() => readStorage(key, initialValue));
-  const stateRef = useRef(state);
-  stateRef.current = state;
-
-  useEffect(() => {
-    const onStorage = (e) => {
-      if (e.key === key && e.newValue) {
-        try { setState(JSON.parse(e.newValue)); } catch {}
-      }
-    };
-    window.addEventListener("storage", onStorage);
-    const interval = setInterval(() => {
-      const raw = readStorage(key, null);
-      if (raw && JSON.stringify(raw) !== JSON.stringify(stateRef.current)) setState(raw);
-    }, 1500);
-    return () => { window.removeEventListener("storage", onStorage); clearInterval(interval); };
-  }, [key]);
-
-  const update = (updater) => {
-    setState((prev) => {
-      const next = typeof updater === "function" ? updater(prev) : updater;
-      writeStorage(key, next);
-      return next;
-    });
-  };
-  return [state, update];
-}
 
 /* ════════════════════════════════════════════════════════════════════════
    INVITE CODE SYSTEM — invite-only registration
    Every account (other than admin-created ones) must be created via a
    valid, active, non-expired, non-exhausted invite code. Codes are managed
    entirely by admins: create, set usage limit, optional expiry, view usage,
-   disable, or delete.
+   disable, or delete. Creation/validation/atomic use-counting all happen
+   server-side now (see admin_create_invite / register_with_invite in
+   supabase/schema.sql) — the helpers below are display-only, used to turn
+   an invite row we already have into a colored status badge.
    ════════════════════════════════════════════════════════════════════════ */
-function genInviteCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no ambiguous chars
-  let out = "";
-  for (let i = 0; i < 8; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return `${out.slice(0, 4)}-${out.slice(4)}`;
-}
-
-function buildInvite({ maxUses, expiresAt, createdBy }) {
-  return {
-    id: genUid("inv"),
-    code: genInviteCode(),
-    maxUses: Math.max(1, parseInt(maxUses, 10) || 1),
-    usedCount: 0,
-    expiresAt: expiresAt || null, // epoch ms or null = never expires
-    status: "active", // active | disabled | deleted
-    createdBy: createdBy || null,
-    createdAt: Date.now(),
-  };
-}
 
 // Returns null if the invite is currently usable, otherwise a human-readable
 // reason it cannot be used. This is always computed dynamically (never
@@ -816,7 +676,7 @@ function AccountCard({ account, onEdit, onDelete, onResetPassword, onToggleEnabl
 /* ════════════════════════════════════════════════════════════════════════
    ADMIN — PLAYER MANAGEMENT (replaces + extends the old Create Player page)
    ════════════════════════════════════════════════════════════════════════ */
-function AdminPlayerManagement({ accounts, setAccounts, currentUser }) {
+function AdminPlayerManagement({ accounts, currentUser }) {
   const emptyForm = { username: "", password: "", displayName: "", isCaptain: false, positions: [], coreRole: [], avatarUrl: null };
   const [form, setForm] = useState(emptyForm);
   const [editingId, setEditingId] = useState(null);
@@ -824,6 +684,7 @@ function AdminPlayerManagement({ accounts, setAccounts, currentUser }) {
   const [resetValue, setResetValue] = useState("");
   const [filter, setFilter] = useState("all");
   const [usernameError, setUsernameError] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const resetForm = () => { setForm(emptyForm); setEditingId(null); setUsernameError(""); };
 
@@ -831,28 +692,31 @@ function AdminPlayerManagement({ accounts, setAccounts, currentUser }) {
   const togglePosition = (id) => setForm((f) => ({ ...f, isCaptain: false, positions: f.positions.includes(id) ? f.positions.filter((p) => p !== id) : [...f.positions, id].sort((a, b) => a - b), coreRole: f.coreRole.filter((r) => r !== id) }));
   const toggleCoreRole = (id) => setForm((f) => ({ ...f, isCaptain: false, coreRole: f.coreRole.includes(id) ? f.coreRole.filter((r) => r !== id) : [...f.coreRole, id].sort((a, b) => a - b), positions: f.positions.filter((p) => p !== id) }));
 
-  const submitForm = () => {
+  const submitForm = async () => {
     if (!form.displayName.trim()) return;
     if (!form.isCaptain && form.coreRole.length === 0) return;
-    if (editingId) {
-      setAccounts((prev) => prev.map((a) => a.id === editingId ? {
-        ...a, displayName: form.displayName.trim(), isCaptain: form.isCaptain,
-        positions: form.isCaptain ? [CAPTAIN_ID] : [...form.positions],
-        coreRole: [...form.coreRole], avatarUrl: form.avatarUrl || null,
-      } : a));
-      resetForm();
-    } else {
-      if (!form.username.trim() || !form.password) { setUsernameError("需要填写用户名和密码才能为该选手创建登录账号。"); return; }
-      if (accounts.some((a) => a.username.toLowerCase() === form.username.trim().toLowerCase())) { setUsernameError("该用户名已被使用。"); return; }
-      const newAccount = {
-        id: genUid("acct"), username: form.username.trim(), passwordHash: simpleHash(form.password),
-        displayName: form.displayName.trim(), avatarId: DEFAULT_AVATAR_ID, avatarUrl: form.avatarUrl || null,
-        role: "player", enabled: true, source: "admin",
-        isCaptain: form.isCaptain, positions: form.isCaptain ? [CAPTAIN_ID] : [...form.positions],
-        coreRole: [...form.coreRole], joined: false, createdAt: Date.now(),
-      };
-      setAccounts((prev) => [...prev, newAccount]);
-      resetForm();
+    setBusy(true);
+    try {
+      if (editingId) {
+        await Auth.adminUpdateAccount(editingId, {
+          displayName: form.displayName.trim(), isCaptain: form.isCaptain,
+          positions: form.isCaptain ? [CAPTAIN_ID] : [...form.positions],
+          coreRole: [...form.coreRole], avatarUrl: form.avatarUrl || null,
+        });
+        resetForm();
+      } else {
+        if (!form.username.trim() || !form.password) { setUsernameError("需要填写用户名和密码才能为该选手创建登录账号。"); setBusy(false); return; }
+        await Auth.adminCreateAccount({
+          username: form.username.trim(), password: form.password, displayName: form.displayName.trim(),
+          avatarUrl: form.avatarUrl || null, isCaptain: form.isCaptain,
+          positions: form.isCaptain ? [CAPTAIN_ID] : [...form.positions], coreRole: [...form.coreRole],
+        });
+        resetForm();
+      }
+    } catch (e) {
+      setUsernameError(e.message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -868,35 +732,30 @@ function AdminPlayerManagement({ accounts, setAccounts, currentUser }) {
   // window.confirm/alert, since sandboxed preview environments commonly
   // block native browser dialogs — which silently swallows the click and
   // makes the button look completely unresponsive.
-  const deleteAccount = (a) => {
-    setAccounts((prev) => prev.filter((x) => x.id !== a.id));
+  const deleteAccount = async (a) => {
+    try { await Auth.adminDeleteAccount(a.id); } catch (e) { setUsernameError(e.message); }
     if (editingId === a.id) resetForm();
   };
 
   const openResetPassword = (a) => { setResetTarget(a); setResetValue(""); };
-  const confirmResetPassword = () => {
+  const confirmResetPassword = async () => {
     if (!resetValue) return;
-    setAccounts((prev) => prev.map((a) => a.id === resetTarget.id ? { ...a, passwordHash: simpleHash(resetValue) } : a));
+    try { await Auth.adminResetPassword(resetTarget.id, resetValue); } catch (e) { setUsernameError(e.message); }
     setResetTarget(null); setResetValue("");
   };
 
-  const toggleEnabled = (a) => {
+  const toggleEnabled = async (a) => {
     if (a.id === currentUser.id) return;
-    setAccounts((prev) => prev.map((x) => x.id === a.id ? { ...x, enabled: !x.enabled } : x));
+    try { await Auth.adminSetEnabled(a.id, !a.enabled); } catch (e) { setUsernameError(e.message); }
   };
 
-  const toggleRole = (a) => {
+  const toggleRole = async (a) => {
     if (a.id === currentUser.id) return;
-    setAccounts((prev) => prev.map((x) => x.id === a.id ? { ...x, role: x.role === "admin" ? "player" : "admin" } : x));
-  };
-
-  const [confirmingDemoRoster, setConfirmingDemoRoster] = useState(false);
-  const loadDemoRoster = () => {
-    setAccounts((prev) => [...prev, ...buildDemoAccounts()]);
-    setConfirmingDemoRoster(false);
+    try { await Auth.adminSetRole(a.id, a.role === "admin" ? "player" : "admin"); } catch (e) { setUsernameError(e.message); }
   };
 
   const visibleAccounts = accounts.filter((a) => filter === "all" ? true : filter === "admins" ? a.role === "admin" : filter === "captains" ? a.isCaptain : filter === "unassigned" ? (!a.isCaptain && (!a.coreRole || a.coreRole.length === 0)) : a.role === "player");
+
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-4">
@@ -931,21 +790,9 @@ function AdminPlayerManagement({ accounts, setAccounts, currentUser }) {
 
         {usernameError && <div className="text-[11px] font-bold mb-2" style={{ color: "#f87171" }}>{usernameError}</div>}
 
-        <PrimaryButton onClick={submitForm} disabled={!form.displayName.trim() || (!form.isCaptain && form.coreRole.length === 0)} className="w-full">
+        <PrimaryButton onClick={submitForm} disabled={busy || !form.displayName.trim() || (!form.isCaptain && form.coreRole.length === 0)} className="w-full">
           {editingId ? "✓ 保存修改" : "+ 创建选手"}
         </PrimaryButton>
-
-        {confirmingDemoRoster ? (
-          <div className="w-full mt-3 flex items-center gap-1.5">
-            <span className="text-[10px] text-white/50 font-bold flex-1">添加8名队长 + 32名队员？</span>
-            <button onClick={loadDemoRoster} className="text-[10px] px-2 py-1.5 rounded-lg border font-bold" style={{ background: "rgba(0,245,212,0.12)", borderColor: TEAL, color: TEAL }}>✓ 是</button>
-            <button onClick={() => setConfirmingDemoRoster(false)} className="text-[10px] px-2 py-1.5 rounded-lg border font-bold" style={{ borderColor: TEAL_DIM, color: TEAL_SOFT }}>取消</button>
-          </div>
-        ) : (
-          <button onClick={() => setConfirmingDemoRoster(true)} className="w-full mt-3 text-[10px] px-3 py-2 rounded-lg border" style={{ borderColor: TEAL_DIM, color: TEAL_SOFT, background: "rgba(0,0,0,0.3)" }}>
-            ↻ 加载演示名单（8名队长 + 32名队员）
-          </button>
-        )}
       </PanelFrame>
 
       <div className="space-y-4">
@@ -1498,27 +1345,36 @@ function AdminBracketControl({ tournament, setTournament, onBack, onEndTournamen
    Create codes with a required usage limit + optional expiry, view usage
    counts, and disable/delete codes at any time.
    ════════════════════════════════════════════════════════════════════════ */
-function InviteCodeManagement({ invites, setInvites, currentUser, accounts }) {
+function InviteCodeManagement({ invites, currentUser, accounts }) {
   const [maxUses, setMaxUses] = useState(5);
   const [expiresDate, setExpiresDate] = useState(""); // yyyy-mm-dd, optional
   const [filter, setFilter] = useState("all"); // all | active | disabled | expired | used-up
   const [copiedId, setCopiedId] = useState(null);
   const [copyFailedId, setCopyFailedId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
 
   const list = invites || [];
 
-  const createCode = () => {
+  const createCode = async () => {
     const uses = parseInt(maxUses, 10);
     if (!uses || uses < 1) return;
     const expiresAt = expiresDate ? new Date(`${expiresDate}T23:59:59`).getTime() : null;
-    const inv = buildInvite({ maxUses: uses, expiresAt, createdBy: currentUser.id });
-    setInvites((prev) => [inv, ...(prev || [])]);
-    setMaxUses(5);
-    setExpiresDate("");
+    setCreating(true);
+    try {
+      await Auth.adminCreateInvite({ maxUses: uses, expiresAt });
+      setMaxUses(5);
+      setExpiresDate("");
+      setError("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setCreating(false);
+    }
   };
 
-  const setStatus = (id, status) => setInvites((prev) => (prev || []).map((i) => i.id === id ? { ...i, status } : i));
+  const setStatus = (id, status) => Auth.adminSetInviteStatus(id, status).catch((e) => setError(e.message));
 
   // Deleting a code is permanent and immediate: it's removed from the
   // underlying list entirely (not just flagged), so it drops out of every
@@ -1529,7 +1385,7 @@ function InviteCodeManagement({ invites, setInvites, currentUser, accounts }) {
   const requestDelete = (id) => setConfirmDeleteId(id);
   const cancelDelete = () => setConfirmDeleteId(null);
   const confirmDelete = (id) => {
-    setInvites((prev) => (prev || []).filter((i) => i.id !== id));
+    Auth.adminDeleteInvite(id).catch((e) => setError(e.message));
     setConfirmDeleteId(null);
   };
 
@@ -1590,8 +1446,9 @@ function InviteCodeManagement({ invites, setInvites, currentUser, accounts }) {
             <input type="date" value={expiresDate} onChange={(e) => setExpiresDate(e.target.value)}
               className="px-3 py-2 rounded-lg text-sm text-white border bg-black/50" style={{ borderColor: TEAL_DIM, colorScheme: "dark" }} />
           </div>
-          <PrimaryButton onClick={createCode} disabled={!maxUses || parseInt(maxUses, 10) < 1}>+ 生成邀请码</PrimaryButton>
+          <PrimaryButton onClick={createCode} disabled={creating || !maxUses || parseInt(maxUses, 10) < 1}>+ 生成邀请码</PrimaryButton>
         </div>
+        {error && <div className="text-[11px] font-bold mt-3" style={{ color: "#f87171" }}>{error}</div>}
       </PanelFrame>
 
       <div className="flex items-center gap-2 flex-wrap">
@@ -1683,7 +1540,7 @@ function InviteCodeManagement({ invites, setInvites, currentUser, accounts }) {
 /* ════════════════════════════════════════════════════════════════════════
    ADMIN DASHBOARD — wraps Player Management / Draft Control / Bracket Control / Invite Codes
    ════════════════════════════════════════════════════════════════════════ */
-function AdminDashboard({ accounts, setAccounts, currentUser, tournament, setTournament, invites, setInvites }) {
+function AdminDashboard({ accounts, currentUser, tournament, setTournament, invites }) {
   const [adminScreen, setAdminScreen] = useState(1);
 
   const captainPool = useMemo(() => accounts.filter((a) => a.enabled && a.isCaptain).map(toPlayerShape), [accounts]);
@@ -1713,7 +1570,7 @@ function AdminDashboard({ accounts, setAccounts, currentUser, tournament, setTou
   // for Players" with 0 joined once this runs.
   const endTournament = () => {
     setTournament(() => initialTournament());
-    setAccounts((prev) => prev.map((a) => ({ ...a, joined: false })));
+    Auth.adminResetAllJoined().catch((e) => console.error("Failed to clear joined flags:", e));
     setAdminScreen(1);
   };
 
@@ -1729,7 +1586,7 @@ function AdminDashboard({ accounts, setAccounts, currentUser, tournament, setTou
   // Players, needing to Join Tournament again before a fresh draft can begin.
   const resetTournament = () => {
     setTournament(() => initialTournament());
-    setAccounts((prev) => prev.map((a) => ({ ...a, joined: false })));
+    Auth.adminResetAllJoined().catch((e) => console.error("Failed to clear joined flags:", e));
     setAdminScreen(1);
   };
 
@@ -1794,7 +1651,7 @@ function AdminDashboard({ accounts, setAccounts, currentUser, tournament, setTou
 
       {adminScreen === 1 && (
         <div className="pb-8">
-          <AdminPlayerManagement accounts={accounts} setAccounts={setAccounts} currentUser={currentUser} />
+          <AdminPlayerManagement accounts={accounts} currentUser={currentUser} />
         </div>
       )}
       {adminScreen === 2 && (
@@ -1805,7 +1662,7 @@ function AdminDashboard({ accounts, setAccounts, currentUser, tournament, setTou
       )}
       {adminScreen === "invites" && (
         <div className="pb-8">
-          <InviteCodeManagement invites={invites} setInvites={setInvites} currentUser={currentUser} accounts={accounts} />
+          <InviteCodeManagement invites={invites} currentUser={currentUser} accounts={accounts} />
         </div>
       )}
     </div>
@@ -2028,9 +1885,10 @@ function SpectatorContent({ tournament, accounts }) {
 /* ════════════════════════════════════════════════════════════════════════
    PLAYER HOME — Captains & Players join the tournament and see its status
    ════════════════════════════════════════════════════════════════════════ */
-function PlayerHome({ currentUser, setAccounts, tournament, accounts }) {
+function PlayerHome({ currentUser, tournament, accounts }) {
   const stage = getStage(tournament);
-  const joinTournament = () => setAccounts((prev) => prev.map((a) => a.id === currentUser.id ? { ...a, joined: true } : a));
+  const [joinError, setJoinError] = useState("");
+  const joinTournament = () => Auth.setMyJoined(true).catch((e) => setJoinError(e.message));
 
   const joinedPlayers = accounts.filter((a) => a.joined);
   const joinedCaptains = joinedPlayers.filter((a) => a.isCaptain);
@@ -2063,6 +1921,7 @@ function PlayerHome({ currentUser, setAccounts, tournament, accounts }) {
         {!currentUser.joined && (
           <p className="text-[11px] text-white/30 mt-3">点击"加入锦标赛"，然后回到这里查看管理员推进锦标赛的最新状态。</p>
         )}
+        {joinError && <p className="text-[11px] font-bold mt-2" style={{ color: "#f87171" }}>{joinError}</p>}
       </PanelFrame>
 
       <PanelFrame className="p-5">
@@ -2099,68 +1958,80 @@ function PlayerHome({ currentUser, setAccounts, tournament, accounts }) {
    ROOT COMPONENT
    ════════════════════════════════════════════════════════════════════════ */
 export default function DraftDashboard() {
-  const [accounts, setAccounts] = useSyncedState(STORAGE_KEYS.accounts, null);
-  const [tournament, setTournament] = useSyncedState(STORAGE_KEYS.tournament, initialTournament());
-  const [invites, setInvites] = useSyncedState(STORAGE_KEYS.invites, []);
-  const [sessionUsername, setSessionUsername] = useState(() => readStorage(STORAGE_KEYS.session, null));
+  const { rows: rawAccounts, loading: accountsLoading } = useRealtimeTable("public_accounts");
+  const accounts = useMemo(() => rawAccounts.map(Auth.mapAccount), [rawAccounts]);
+  const [tournament, setTournament, { loading: tournamentLoading }] = useSupabaseTournament(initialTournament());
+  const { rows: rawInvites } = useRealtimeTable("invites");
+  const invites = useMemo(() => rawInvites.map(Auth.mapInvite), [rawInvites]);
+
+  const [currentUser, setCurrentUser] = useState(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [authError, setAuthError] = useState("");
   const [view, setView] = useState("home");
 
-  useEffect(() => { if (accounts === null) setAccounts([buildDefaultAdmin()]); }, [accounts]);
+  // On first load, try to resolve any session token already in this browser
+  // back into an account (page refresh / return visit), instead of forcing
+  // a fresh login every time.
+  useEffect(() => {
+    let cancelled = false;
+    Auth.restoreSession().then((account) => {
+      if (!cancelled) { setCurrentUser(account); setSessionChecked(true); }
+    });
+    return () => { cancelled = true; };
+  }, []);
 
-  const currentUser = useMemo(() => (accounts || []).find((a) => a.username === sessionUsername) || null, [accounts, sessionUsername]);
+  // Keep currentUser's fields (role/enabled/profile edits/joined) live if an
+  // admin changes them elsewhere, without requiring the user to log in again.
+  // If an admin disables the account, boot the session immediately.
+  useEffect(() => {
+    if (!currentUser) return;
+    const fresh = accounts.find((a) => a.id === currentUser.id);
+    if (!fresh) return;
+    if (!fresh.enabled) { Auth.logout(); setCurrentUser(null); return; }
+    if (JSON.stringify(fresh) !== JSON.stringify(currentUser)) setCurrentUser(fresh);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts]);
 
   useEffect(() => { if (currentUser) setView(currentUser.role === "admin" ? "admin" : "home"); }, [currentUser?.id]);
 
-  const doLogin = ({ username, password }) => {
+  const doLogin = async ({ username, password }) => {
     setAuthError("");
-    const acct = (accounts || []).find((a) => a.username.toLowerCase() === username.toLowerCase());
-    if (!acct) { setAuthError("找不到该用户名对应的账号。"); return; }
-    if (!acct.enabled) { setAuthError("该账号已被禁用，请联系管理员。"); return; }
-    if (acct.passwordHash !== simpleHash(password)) { setAuthError("密码错误。"); return; }
-    setSessionUsername(acct.username);
-    writeStorage(STORAGE_KEYS.session, acct.username);
+    try {
+      const account = await Auth.login({ username, password });
+      setCurrentUser(account);
+    } catch (e) { setAuthError(e.message); }
   };
 
   // Registration is invite-only: no account can be created without a valid,
-  // active, non-expired, non-exhausted invite code. The code lookup and the
-  // usage-increment happen against the latest persisted invite list so two
-  // people racing to use the last remaining use can't both get in.
-  // Players now pick their own Captain / Core Role / Sub Role at signup
-  // (same rule as the Admin Dashboard's player form: Captain, or a non-
-  // captain with at least one Core Role), so an admin no longer needs to set
-  // these manually afterwards.
-  const doRegister = ({ username, password, confirmPassword, displayName, avatarUrl, inviteCode, isCaptain, coreRole, positions }) => {
+  // active, non-expired, non-exhausted invite code. The invite lookup and
+  // the usage-increment happen atomically inside register_with_invite() in
+  // Postgres (see supabase/schema.sql), so two people racing to use the
+  // last remaining use can't both get in. Username-uniqueness and invite
+  // validity are also enforced there, not just in this client-side form.
+  // Players pick their own Captain / Core Role / Sub Role at signup (same
+  // rule as the Admin Dashboard's player form: Captain, or a non-captain
+  // with at least one Core Role), so an admin no longer needs to set these
+  // manually afterwards.
+  const doRegister = async ({ username, password, confirmPassword, displayName, avatarUrl, inviteCode, isCaptain, coreRole, positions }) => {
     setAuthError("");
     if (!username || !password || !displayName) { setAuthError("请填写所有必填项。"); return; }
     if (!inviteCode) { setAuthError("注册需要邀请码。"); return; }
     if (!isCaptain && (!coreRole || coreRole.length === 0)) { setAuthError("请选择队长身份，或至少一个主要位置。"); return; }
     if (password !== confirmPassword) { setAuthError("两次输入的密码不一致。"); return; }
-    if ((accounts || []).some((a) => a.username.toLowerCase() === username.toLowerCase())) { setAuthError("该用户名已被使用。"); return; }
 
-    const latestInvites = readStorage(STORAGE_KEYS.invites, invites || []) || [];
-    const invite = latestInvites.find((i) => i.code.toLowerCase() === inviteCode.toLowerCase());
-    const rejectReason = inviteRejectReason(invite);
-    if (rejectReason) { setAuthError(rejectReason); return; }
-
-    const newAcct = {
-      id: genUid("acct"), username, passwordHash: simpleHash(password), displayName,
-      avatarId: DEFAULT_AVATAR_ID, avatarUrl: avatarUrl || null,
-      role: "player", enabled: true, source: "self", inviteCodeUsed: invite.code,
-      isCaptain: !!isCaptain,
-      positions: isCaptain ? [CAPTAIN_ID] : [...(positions || [])],
-      coreRole: isCaptain ? [] : [...(coreRole || [])],
-      joined: false, createdAt: Date.now(),
-    };
-    setAccounts((prev) => [...(prev || []), newAcct]);
-    setInvites((prev) => (prev || []).map((i) => i.id === invite.id ? { ...i, usedCount: i.usedCount + 1 } : i));
-    setSessionUsername(username);
-    writeStorage(STORAGE_KEYS.session, username);
+    try {
+      const account = await Auth.register({
+        username, password, displayName, avatarUrl, inviteCode, isCaptain, coreRole, positions,
+      });
+      setCurrentUser(account);
+    } catch (e) { setAuthError(e.message); }
   };
 
-  const logout = () => { setSessionUsername(null); try { localStorage.removeItem(STORAGE_KEYS.session); } catch {} };
+  const logout = () => { Auth.logout(); setCurrentUser(null); };
 
-  if (accounts === null) return <div className="min-h-screen flex items-center justify-center text-white/40" style={{ background: "#050807" }}>加载中…</div>;
+  if (!sessionChecked || accountsLoading || tournamentLoading) {
+    return <div className="min-h-screen flex items-center justify-center text-white/40" style={{ background: "#050807" }}>加载中…</div>;
+  }
 
   if (!currentUser) {
     return <AuthScreen onLogin={doLogin} onRegister={doRegister} error={authError} />;
@@ -2172,11 +2043,11 @@ export default function DraftDashboard() {
       <NavBar currentUser={currentUser} view={view} setView={setView} onLogout={logout} />
 
       {view === "admin" && currentUser.role === "admin" && (
-        <AdminDashboard accounts={accounts} setAccounts={setAccounts} currentUser={currentUser} tournament={tournament} setTournament={setTournament} invites={invites} setInvites={setInvites} />
+        <AdminDashboard accounts={accounts} currentUser={currentUser} tournament={tournament} setTournament={setTournament} invites={invites} />
       )}
 
       {view === "home" && (currentUser.role === "player" || currentUser.role === "admin") && (
-        <PlayerHome currentUser={currentUser} setAccounts={setAccounts} tournament={tournament} accounts={accounts} />
+        <PlayerHome currentUser={currentUser} tournament={tournament} accounts={accounts} />
       )}
 
       {view === "spectator" && (
