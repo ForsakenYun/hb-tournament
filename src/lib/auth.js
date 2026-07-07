@@ -175,8 +175,9 @@ export async function adminDeleteInvite(inviteId) {
 
 // ── self-service ─────────────────────────────────────────────────────────
 export async function setMyJoined(joined) {
-  const { error } = await supabase.rpc("set_my_joined", { p_session_token: getSessionToken(), p_joined: joined });
+  const { data, error } = await supabase.rpc("set_my_joined", { p_session_token: getSessionToken(), p_joined: joined });
   if (error) throw rpcError(error, "操作失败。");
+  return mapAccount(data);
 }
 
 export async function adminResetAllJoined() {
