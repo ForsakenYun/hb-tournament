@@ -65,9 +65,13 @@ export function mapInvite(row) {
 }
 
 function rpcError(error, fallback) {
+  // Always log the raw PostgREST/Postgres error (message/code/hint/details)
+  // so it's inspectable in devtools regardless of what the user sees.
+  console.error("[Supabase RPC error]", error);
+
   // Postgres RAISE EXCEPTION messages come through as error.message,
-  // typically prefixed like "invalid_credentials". Surface something readable.
-  const code = error?.message?.match(/^[a-z_]+$/)?.[0] ?? error?.message;
+  // typically a short snake_case code like "invalid_credentials".
+  const code = error?.message?.match(/^[a-z_]+$/)?.[0];
   const known = {
     invalid_credentials: "用户名或密码错误。",
     account_disabled: "该账号已被禁用。",
@@ -80,7 +84,20 @@ function rpcError(error, fallback) {
     cannot_delete_self: "无法删除自己的账号。",
     code_generation_failed: "生成邀请码失败，请重试。",
   };
-  return new Error(known[code] || fallback || error?.message || "操作失败。");
+  if (code && known[code]) {
+    const err = new Error(known[code]);
+    err.code = code;
+    return err;
+  }
+
+  // Anything we don't recognize (a missing function, a permissions error, a
+  // constraint violation, ...) is unexpected — surface the real detail
+  // instead of a one-size-fits-all message, so a failure is debuggable
+  // directly from the UI, not just from devtools.
+  const detail = error?.message || error?.hint || error?.details || error?.code || "未知错误";
+  const err = new Error(`${fallback || "操作失败"}（${detail}）`);
+  err.code = code || "unknown";
+  return err;
 }
 
 // ── auth ────────────────────────────────────────────────────────────────
