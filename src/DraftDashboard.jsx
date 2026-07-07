@@ -1568,9 +1568,22 @@ function AdminDashboard({ accounts, currentUser, tournament, setTournament, invi
   // to take part in the next tournament. Spectator View reads the same
   // tournament + accounts state, so it automatically falls back to "Waiting
   // for Players" with 0 joined once this runs.
-  const endTournament = () => {
+  const [resetError, setResetError] = useState("");
+
+  const clearAllJoinedFlags = async () => {
+    try {
+      await Auth.adminResetAllJoined();
+      setResetError("");
+      return true;
+    } catch (e) {
+      setResetError(e.message + " —— 玩家的\"已加入\"状态可能未被清除，请点击重试。");
+      return false;
+    }
+  };
+
+  const endTournament = async () => {
     setTournament(() => initialTournament());
-    Auth.adminResetAllJoined().catch((e) => console.error("Failed to clear joined flags:", e));
+    await clearAllJoinedFlags();
     setAdminScreen(1);
   };
 
@@ -1584,13 +1597,12 @@ function AdminDashboard({ accounts, currentUser, tournament, setTournament, invi
   // "joined" flag — so every connected Player, Captain, and Spectator sees
   // the tournament disappear and everyone lands back on Home / Waiting for
   // Players, needing to Join Tournament again before a fresh draft can begin.
-  const resetTournament = () => {
+  const resetTournament = async () => {
     setTournament(() => initialTournament());
-    Auth.adminResetAllJoined().catch((e) => console.error("Failed to clear joined flags:", e));
+    await clearAllJoinedFlags();
     setAdminScreen(1);
   };
 
-  const tournamentInProgress = tournament.teams.length === 8;
   const [confirmingReset, setConfirmingReset] = useState(false);
 
   const canStartDraft = captainPool.length >= 8 && draftPool.length > 0;
@@ -1622,14 +1634,19 @@ function AdminDashboard({ accounts, currentUser, tournament, setTournament, invi
           ⚡ 开始选秀
         </button>
         <PillButton small active={adminScreen === "invites"} onClick={() => setAdminScreen("invites")}>🎟 邀请码</PillButton>
-        {tournamentInProgress && (
-          <button onClick={() => setConfirmingReset(true)}
-            className={actionButtonClass}
-            style={{ borderColor: "#5a3a14", color: "#fbbf24", background: "rgba(0,0,0,0.3)" }}>
-            ⚠ 重置锦标赛
-          </button>
-        )}
+        <button onClick={() => setConfirmingReset(true)}
+          className={actionButtonClass}
+          style={{ borderColor: "#5a3a14", color: "#fbbf24", background: "rgba(0,0,0,0.3)" }}>
+          ⚠ 重置锦标赛
+        </button>
       </div>
+
+      {resetError && (
+        <div className="max-w-xl mx-auto mb-4 flex items-center gap-3 px-4 py-2.5 rounded-lg border text-[12px] font-bold" style={{ borderColor: "#5a1414", color: "#f87171", background: "rgba(248,113,113,0.08)" }}>
+          <span className="flex-1">{resetError}</span>
+          <button onClick={clearAllJoinedFlags} className="px-2.5 py-1 rounded-md border shrink-0" style={{ borderColor: "#f87171", color: "#f87171" }}>重试</button>
+        </div>
+      )}
 
       {confirmingReset && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)" }}>
