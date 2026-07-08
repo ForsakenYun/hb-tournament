@@ -1,7 +1,6 @@
 // lib/useSupabaseSync.js
 //
-// Centralized Supabase data-access hooks. Two shapes, because the two kinds
-// of shared data in this app have different rules:
+// Centralized Supabase data-access hooks. Three shapes:
 //
 // 1. useRealtimeTable(table)  — read-only live list (accounts, invites).
 //    Mutations for these go through named RPC functions in lib/auth.js
@@ -17,10 +16,19 @@
 //    table gets a generic sync hook and AdminDraftControl / AdminBracketControl
 //    / PlayerHome / SpectatorContent need ZERO changes — they keep calling
 //    setTournament(prev => ({...prev, ...})) exactly as before.
+//
+// 3. usePresence(currentUser) — tracks this browser tab as "connected" on a
+//    shared Realtime Presence channel, and reconciles `accounts.joined`
+//    against who's actually connected whenever that set changes. This is
+//    what makes a crashed tab / lost network / force-closed browser
+//    eventually un-join a player before the draft starts, without relying
+//    on any unload event the browser might never fire. See reconcile_joined
+//    in supabase/schema.sql for why this is always safe to call and never
+//    touches anything once the draft is underway.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "./supabaseClient";
-import { getSessionToken } from "./auth";
+import { getSessionToken, reconcileJoined } from "./auth";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Read-only live table (accounts / invites)
@@ -117,4 +125,67 @@ export function useSupabaseTournament(initialValue) {
   }, []);
 
   return [state, setState, { loading, error }];
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Presence — "who's actually connected right now"
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Every logged-in tab (any role) tracks itself on one shared presence
+// channel, keyed by account id. Supabase's realtime server maintains this
+// over the tab's own WebSocket connection — a graceful tab close sends a
+// clean leave almost immediately; a crash or lost network is detected via
+// the connection's own heartbeat timing out, with no reliance on any
+// unload/beforeunload event (those are exactly the events that don't fire
+// reliably on a crash, which is the whole reason this exists instead of a
+// simpler onbeforeunload handler).
+//
+// Multiple tabs/sessions for the same account naturally collapse into one
+// "present" entry (same key), which is also what keeps a duplicate login
+// from ever counting as two participants — reconcile_joined only clears
+// `joined` when an account has *zero* present connections left, not one.
+//
+// A light client-side throttle (skip a reconcile call if one already ran
+// in the last 2s) avoids every connected tab hammering the RPC at once
+// when several people disconnect in a burst; reconcile_joined itself is a
+// no-op if there's nothing stale to clear, so this is purely to reduce
+// redundant network traffic, not for correctness.
+const RECONCILE_THROTTLE_MS = 2000;
+
+export function usePresence(currentUser) {
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const channel = supabase.channel("tournament-presence", {
+      config: { presence: { key: currentUser.id } },
+    });
+
+    let lastReconcile = 0;
+    let pending = null;
+    const reconcile = () => {
+      const now = Date.now();
+      const runIn = Math.max(0, RECONCILE_THROTTLE_MS - (now - lastReconcile));
+      if (pending) return;
+      pending = setTimeout(() => {
+        pending = null;
+        lastReconcile = Date.now();
+        const presentIds = Object.keys(channel.presenceState());
+        reconcileJoined(presentIds);
+      }, runIn);
+    };
+
+    channel
+      .on("presence", { event: "sync" }, reconcile)
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          channel.track({ online_at: new Date().toISOString() });
+        }
+      });
+
+    return () => {
+      if (pending) clearTimeout(pending);
+      channel.untrack();
+      supabase.removeChannel(channel);
+    };
+  }, [currentUser?.id]);
 }

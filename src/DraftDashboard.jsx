@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { useRealtimeTable, useSupabaseTournament } from "./lib/useSupabaseSync";
+import { useRealtimeTable, useSupabaseTournament, usePresence } from "./lib/useSupabaseSync";
 import * as Auth from "./lib/auth";
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -1986,9 +1986,15 @@ export default function DraftDashboard() {
   const [authError, setAuthError] = useState("");
   const [view, setView] = useState("home");
 
+  usePresence(currentUser);
+
   // On first load, try to resolve any session token already in this browser
   // back into an account (page refresh / return visit), instead of forcing
-  // a fresh login every time.
+  // a fresh login every time. Since the token lives in sessionStorage (not
+  // localStorage), this only ever finds one within the same tab that hasn't
+  // been closed — a fresh tab or a reopened browser has nothing to restore,
+  // which is exactly what makes closing the browser require logging in
+  // again.
   useEffect(() => {
     let cancelled = false;
     Auth.restoreSession().then((account) => {
@@ -1999,12 +2005,14 @@ export default function DraftDashboard() {
 
   // Keep currentUser's fields (role/enabled/profile edits/joined) live if an
   // admin changes them elsewhere, without requiring the user to log in again.
-  // If an admin disables the account, boot the session immediately.
+  // If an admin disables the account, boot the session immediately —
+  // gracefully (unjoins first, pre-draft) rather than just clearing the
+  // local token, since this is effectively a forced logout.
   useEffect(() => {
     if (!currentUser) return;
     const fresh = accounts.find((a) => a.id === currentUser.id);
     if (!fresh) return;
-    if (!fresh.enabled) { Auth.logout(); setCurrentUser(null); return; }
+    if (!fresh.enabled) { Auth.logoutAndLeave(); setCurrentUser(null); return; }
     if (JSON.stringify(fresh) !== JSON.stringify(currentUser)) setCurrentUser(fresh);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accounts]);
@@ -2044,7 +2052,7 @@ export default function DraftDashboard() {
     } catch (e) { setAuthError(e.message); }
   };
 
-  const logout = () => { Auth.logout(); setCurrentUser(null); };
+  const logout = async () => { await Auth.logoutAndLeave(); setCurrentUser(null); };
 
   if (!sessionChecked || accountsLoading || tournamentLoading) {
     return <div className="min-h-screen flex items-center justify-center text-white/40" style={{ background: "#050807" }}>加载中…</div>;

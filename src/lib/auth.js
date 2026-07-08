@@ -11,22 +11,69 @@
 //
 // Session handling: verify_login / register_with_invite return a
 // session_token. We store *only that token* (not the password, not the
-// hash) in localStorage. This is a per-device session identifier, not
-// shared application data, so this is the one legitimate remaining use of
-// localStorage in the app.
+// hash) in sessionStorage — not localStorage. This is the actual mechanism
+// that makes "refresh keeps you logged in, closing the tab/browser logs you
+// out" true: sessionStorage survives a page reload but is destroyed when
+// the tab or browser closes, per-tab, by the browser itself. (It also
+// fixes a real bug this used to have: with localStorage, logging into a
+// second account in another tab of the same browser would silently
+// overwrite the token every other tab was using. sessionStorage is
+// per-tab, so that can't happen anymore.)
+// The 12-hour server-side session TTL (see supabase/schema.sql) is a
+// secondary, defense-in-depth limit — it is not what makes closing the
+// browser log you out; sessionStorage being cleared is.
 
 import { supabase } from "./supabaseClient";
 
 const SESSION_KEY = "draft_app_session_token";
 
 export function getSessionToken() {
-  try { return localStorage.getItem(SESSION_KEY); } catch { return null; }
+  try { return sessionStorage.getItem(SESSION_KEY); } catch { return null; }
 }
 function setSessionToken(token) {
-  try { localStorage.setItem(SESSION_KEY, token); } catch {}
+  try { sessionStorage.setItem(SESSION_KEY, token); } catch {}
 }
-export function logout() {
-  try { localStorage.removeItem(SESSION_KEY); } catch {}
+
+// Clears the token from this tab only — no network round trip. Used for
+// "this session turned out to already be invalid" cases (a rejected/expired
+// token found during restoreSession, or an admin-disabled account) where
+// there's no point telling a server that already doesn't recognize us, and
+// where firing a network call on every failed session check (which happens
+// on every page load for a logged-out visitor) would be wasteful. Any
+// `joined` flag left behind by an abandoned session is still cleaned up by
+// reconcile_joined()'s "no valid session left" sweep.
+export function clearLocalSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch {}
+}
+
+// Full, graceful logout: if the tournament hasn't started, unjoin first
+// (server-side, so it propagates via Realtime immediately instead of
+// waiting on a presence timeout), then destroy the session row so the
+// token can't be replayed, then clear it locally. Always clears the local
+// token even if the network call fails, so the user's own browser is never
+// left looking logged-in when they explicitly asked to log out.
+export async function logoutAndLeave() {
+  const token = getSessionToken();
+  if (token) {
+    try {
+      const { error } = await supabase.rpc("logout_and_leave", { p_session_token: token });
+      if (error) console.error("[Supabase RPC error]", error);
+    } catch (e) {
+      console.error("logout_and_leave failed:", e);
+    }
+  }
+  clearLocalSession();
+}
+
+// Tells the server which accounts are *currently* connected (per Realtime
+// Presence), so it can clear `joined` for anyone who disconnected without
+// logging out — crashes, closed tabs, lost network. No-ops once the draft
+// has started; see reconcile_joined() in schema.sql.
+export async function reconcileJoined(presentIds) {
+  const token = getSessionToken();
+  if (!token) return; // nothing to reconcile as if we're not logged in
+  const { error } = await supabase.rpc("reconcile_joined", { p_session_token: token, p_present_ids: presentIds });
+  if (error) console.error("[Supabase RPC error]", error);
 }
 
 // ── row <-> app-shape mapping ──────────────────────────────────────────
@@ -116,9 +163,9 @@ export async function restoreSession() {
   const token = getSessionToken();
   if (!token) return null;
   const { data, error } = await supabase.rpc("whoami", { p_session_token: token });
-  if (error || !data) { logout(); return null; }
+  if (error || !data) { clearLocalSession(); return null; }
   const row = Array.isArray(data) ? data[0] : data;
-  if (!row) { logout(); return null; }
+  if (!row) { clearLocalSession(); return null; }
   return mapAccount(row);
 }
 
