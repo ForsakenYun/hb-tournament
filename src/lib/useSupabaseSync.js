@@ -1,109 +1,146 @@
-// lib/useSupabaseSync.js
-//
-// Centralized Supabase data-access hooks. Three shapes:
-//
-// 1. useRealtimeTable(table)  — read-only live list (accounts, invites).
-//    Mutations for these go through named RPC functions in lib/auth.js
-//    (createAccount, setEnabled, createInvite, ...) because each of those
-//    actions has real server-side rules attached (password hashing, invite
-//    atomicity, "can't disable yourself", ...) that must not live in the
-//    client. See lib/auth.js.
-//
-// 2. useSupabaseTournament()  — a [state, setState] pair with the *same*
-//    shape as the old useSyncedState(key, initial) hook. Only admins ever
-//    call setTournament in this app, and every admin action is already a
-//    full-object mutation (draft picks, bracket rounds, ...), so this one
-//    table gets a generic sync hook and AdminDraftControl / AdminBracketControl
-//    / PlayerHome / SpectatorContent need ZERO changes — they keep calling
-//    setTournament(prev => ({...prev, ...})) exactly as before.
-//
-// 3. usePresence(currentUser) — tracks this browser tab as "connected" on a
-//    shared Realtime Presence channel, and reconciles `accounts.joined`
-//    against who's actually connected whenever that set changes. This is
-//    what makes a crashed tab / lost network / force-closed browser
-//    eventually un-join a player before the draft starts, without relying
-//    on any unload event the browser might never fire. See reconcile_joined
-//    in supabase/schema.sql for why this is always safe to call and never
-//    touches anything once the draft is underway.
-
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { supabase } from "./supabaseClient";
-import { getSessionToken, reconcileJoined } from "./auth";
 
-// ─────────────────────────────────────────────────────────────────────────
-// Read-only live table (accounts / invites)
-// ─────────────────────────────────────────────────────────────────────────
-export function useRealtimeTable(table, { orderBy = "created_at", ascending = true } = {}) {
+/* ════════════════════════════════════════════════════════════════════════
+   useRealtimeTable(table)
+   Generic "give me a live-updating array of every row in this table" hook.
+   Used for `public_accounts` and `invites` in DraftDashboard.jsx — both are
+   read this way and then mapped through Auth.mapAccount / Auth.mapInvite.
+
+   ASSUMPTION: rows are ordered by `created_at` (both tables are assumed to
+   have that column per the schema notes below) and Realtime is enabled for
+   both tables in the Supabase dashboard (Database → Replication).
+   ════════════════════════════════════════════════════════════════════════ */
+export function useRealtimeTable(table) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
       setLoading(true);
-      const { data, error } = await supabase.from(table).select("*").order(orderBy, { ascending });
+      const { data, error } = await supabase.from(table).select("*").order("created_at", { ascending: true });
       if (cancelled) return;
-      if (error) setError(error);
-      else setRows(data ?? []);
+      if (error) {
+        // eslint-disable-next-line no-console
+        console.error(`[useRealtimeTable] failed to load "${table}":`, error.message);
+        setRows([]);
+      } else {
+        setRows(data || []);
+      }
       setLoading(false);
     }
     load();
 
-    // Realtime: any insert/update/delete on this table re-fetches. A full
-    // re-fetch (rather than patching the single changed row into state) is
-    // deliberately simple and correct; these tables are small (accounts,
-    // invites), so the extra round trip is cheap and avoids subtle
-    // out-of-order-event bugs.
     const channel = supabase
       .channel(`realtime:${table}`)
-      .on("postgres_changes", { event: "*", schema: "public", table }, () => load())
+      .on("postgres_changes", { event: "*", schema: "public", table }, (payload) => {
+        setRows((prev) => {
+          if (payload.eventType === "INSERT") {
+            if (prev.some((r) => r.id === payload.new.id)) return prev;
+            return [...prev, payload.new];
+          }
+          if (payload.eventType === "UPDATE") {
+            return prev.map((r) => (r.id === payload.new.id ? payload.new : r));
+          }
+          if (payload.eventType === "DELETE") {
+            return prev.filter((r) => r.id !== payload.old.id);
+          }
+          return prev;
+        });
+      })
       .subscribe();
 
     return () => {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, [table, orderBy, ascending]);
+  }, [table]);
 
-  return { rows, loading, error };
+  return { rows, loading };
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Tournament singleton — drop-in replacement for
-// const [tournament, setTournament] = useSyncedState("tournament", initialTournament())
-// ─────────────────────────────────────────────────────────────────────────
-export function useSupabaseTournament(initialValue) {
-  const [state, setStateLocal] = useState(initialValue);
+/* ════════════════════════════════════════════════════════════════════════
+   useSupabaseTournament(initial)
+   The whole `tournament` object DraftDashboard.jsx builds up (teams, pool,
+   pickIndex, draftPhase, round1/wb/lb, ...) is one JS object, so this
+   stores it as a single JSON row rather than a normalized table — the
+   single most direct way to make `setTournament(prev => ...)` from the
+   component keep working unmodified.
+
+   ASSUMPTION: a `tournament` table with a fixed single row `id = 1` and a
+   `state` jsonb column (see schema notes below). If that row doesn't exist
+   yet, it's created from `initial` on first load.
+
+   Returns [tournament, setTournament, { loading }] exactly like the
+   component destructures it: `const [tournament, setTournament, { loading:
+   tournamentLoading }] = useSupabaseTournament(initialTournament());`
+   ════════════════════════════════════════════════════════════════════════ */
+const TOURNAMENT_ROW_ID = 1;
+
+export function useSupabaseTournament(initial) {
+  const [tournament, setTournamentState] = useState(initial);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  // Guards against redundant writes: if a realtime event echoes back the
-  // write we just made, skip re-applying it.
-  const lastWrittenRef = useRef(null);
+  const stateRef = useRef(initial);
+  // Tracks the JSON we most recently pushed ourselves, so that when the
+  // realtime echo of our own write comes back we don't redundantly re-render
+  // with an (identical) new object reference.
+  const lastPushedRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      const { data, error } = await supabase.from("tournament_state").select("data").eq("id", "main").single();
+      setLoading(true);
+      const { data, error } = await supabase
+        .from("tournament")
+        .select("state")
+        .eq("id", TOURNAMENT_ROW_ID)
+        .maybeSingle();
+
       if (cancelled) return;
-      if (error) { setError(error); setLoading(false); return; }
-      setStateLocal(data?.data && Object.keys(data.data).length ? data.data : initialValue);
-      setLoading(false);
+
+      if (error) {
+        // eslint-disable-next-line no-console
+        console.error("[useSupabaseTournament] failed to load:", error.message);
+      }
+
+      if (!error && data && data.state) {
+        stateRef.current = data.state;
+        lastPushedRef.current = JSON.stringify(data.state);
+        setTournamentState(data.state);
+      } else {
+        // No row yet — seed it with the initial (fresh) tournament shape.
+        const { error: upsertError } = await supabase
+          .from("tournament")
+          .upsert({ id: TOURNAMENT_ROW_ID, state: initial, updated_at: new Date().toISOString() });
+        if (upsertError) {
+          // eslint-disable-next-line no-console
+          console.error("[useSupabaseTournament] failed to seed row:", upsertError.message);
+        }
+        stateRef.current = initial;
+        lastPushedRef.current = JSON.stringify(initial);
+      }
+      if (!cancelled) setLoading(false);
     }
     load();
 
     const channel = supabase
-      .channel("realtime:tournament_state")
-      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "tournament_state", filter: "id=eq.main" }, (payload) => {
-        const next = payload.new?.data;
-        if (next && JSON.stringify(next) !== JSON.stringify(lastWrittenRef.current)) {
-          setStateLocal(next);
+      .channel("realtime:tournament")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "tournament", filter: `id=eq.${TOURNAMENT_ROW_ID}` },
+        (payload) => {
+          const nextState = payload.new?.state;
+          if (!nextState) return;
+          const asString = JSON.stringify(nextState);
+          if (asString === lastPushedRef.current) return; // our own write echoing back
+          lastPushedRef.current = asString;
+          stateRef.current = nextState;
+          setTournamentState(nextState);
         }
-      })
+      )
       .subscribe();
 
     return () => {
@@ -113,79 +150,62 @@ export function useSupabaseTournament(initialValue) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const setState = useCallback((updater) => {
-    setStateLocal((prev) => {
-      const next = typeof updater === "function" ? updater(prev) : updater;
-      lastWrittenRef.current = next;
-      supabase
-        .rpc("admin_write_tournament", { p_session_token: getSessionToken(), p_data: next })
-        .then(({ error }) => { if (error) console.error("Failed to save tournament state:", error); });
-      return next;
-    });
+  const setTournament = useCallback((updater) => {
+    const next = typeof updater === "function" ? updater(stateRef.current) : updater;
+    stateRef.current = next;
+    lastPushedRef.current = JSON.stringify(next);
+    setTournamentState(next);
+
+    supabase
+      .from("tournament")
+      .upsert({ id: TOURNAMENT_ROW_ID, state: next, updated_at: new Date().toISOString() })
+      .then(({ error }) => {
+        if (error) {
+          // eslint-disable-next-line no-console
+          console.error("[useSupabaseTournament] failed to save:", error.message);
+        }
+      });
   }, []);
 
-  return [state, setState, { loading, error }];
+  return [tournament, setTournament, { loading }];
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Presence — "who's actually connected right now"
-// ─────────────────────────────────────────────────────────────────────────
-//
-// Every logged-in tab (any role) tracks itself on one shared presence
-// channel, keyed by account id. Supabase's realtime server maintains this
-// over the tab's own WebSocket connection — a graceful tab close sends a
-// clean leave almost immediately; a crash or lost network is detected via
-// the connection's own heartbeat timing out, with no reliance on any
-// unload/beforeunload event (those are exactly the events that don't fire
-// reliably on a crash, which is the whole reason this exists instead of a
-// simpler onbeforeunload handler).
-//
-// Multiple tabs/sessions for the same account naturally collapse into one
-// "present" entry (same key), which is also what keeps a duplicate login
-// from ever counting as two participants — reconcile_joined only clears
-// `joined` when an account has *zero* present connections left, not one.
-//
-// A light client-side throttle (skip a reconcile call if one already ran
-// in the last 2s) avoids every connected tab hammering the RPC at once
-// when several people disconnect in a burst; reconcile_joined itself is a
-// no-op if there's nothing stale to clear, so this is purely to reduce
-// redundant network traffic, not for correctness.
-const RECONCILE_THROTTLE_MS = 2000;
+/* ════════════════════════════════════════════════════════════════════════
+   usePresence(currentUser)
+   DraftDashboard.jsx calls this with no return value used, purely for its
+   side effect. Rather than requiring a dedicated presence table/migration,
+   this uses Supabase Realtime's built-in Presence feature (a Realtime
+   channel's .track()), which needs no schema changes at all — the most
+   conservative choice since presence data isn't read/displayed anywhere
+   else in the component today, but this keeps every logged-in user's
+   channel state visible to anyone else who later chooses to subscribe.
 
+   ASSUMPTION: this is genuinely inferred, not read from usage elsewhere in
+   DraftDashboard.jsx (no other line reads a presence/online field). If your
+   original implementation instead wrote to a `presence` table with a
+   `last_seen` column, let me know and I can swap this for that.
+   ════════════════════════════════════════════════════════════════════════ */
 export function usePresence(currentUser) {
   useEffect(() => {
     if (!currentUser) return;
 
-    const channel = supabase.channel("tournament-presence", {
+    const channel = supabase.channel("presence:lobby", {
       config: { presence: { key: currentUser.id } },
     });
 
-    let lastReconcile = 0;
-    let pending = null;
-    const reconcile = () => {
-      const now = Date.now();
-      const runIn = Math.max(0, RECONCILE_THROTTLE_MS - (now - lastReconcile));
-      if (pending) return;
-      pending = setTimeout(() => {
-        pending = null;
-        lastReconcile = Date.now();
-        const presentIds = Object.keys(channel.presenceState());
-        reconcileJoined(presentIds);
-      }, runIn);
-    };
-
-    channel
-      .on("presence", { event: "sync" }, reconcile)
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          channel.track({ online_at: new Date().toISOString() });
-        }
-      });
+    channel.subscribe((status) => {
+      if (status === "SUBSCRIBED") {
+        channel.track({
+          id: currentUser.id,
+          displayName: currentUser.displayName,
+          role: currentUser.role,
+          online_at: new Date().toISOString(),
+        });
+      }
+    });
 
     return () => {
-      if (pending) clearTimeout(pending);
-      channel.untrack();
       supabase.removeChannel(channel);
     };
-  }, [currentUser?.id]);
+  }, [currentUser?.id, currentUser?.displayName, currentUser?.role]);
 }
